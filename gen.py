@@ -7,7 +7,6 @@ import xml.sax.saxutils as xml_escape
 
 
 def _escape_attr(value: Any) -> str:
-    """Convert a Python value to a safe XML attribute string."""
     if isinstance(value, bool):
         text = "true" if value else "false"
     elif isinstance(value, (list, tuple)):
@@ -25,24 +24,11 @@ def _format_vec3(values: Sequence[float]) -> str:
 
 @dataclass(frozen=True)
 class MacroSpec:
-    """Describe which xacro macro should be used for an Arm instance."""
     include_file: str
     macro_name: str
 
 
 class Link:
-    """
-    A simple scene link.
-
-    First version:
-    - it has a name
-    - it is mounted to a parent Link
-    - it has an origin relative to its parent
-    - it will be rendered as:
-        <link name="..."/>
-        <joint type="fixed"> ... <origin .../> ... </joint>
-    """
-
     def __init__(
         self,
         name: str,
@@ -76,13 +62,6 @@ WORLD = Link("world", parent=None)
 
 
 class Arm:
-    """
-    A concrete arm instance in the scene.
-
-    This class stores the information required to instantiate
-    an existing xacro macro.
-    """
-
     def __init__(
         self,
         name: str,
@@ -112,14 +91,7 @@ class Arm:
             raise ValueError("Arm.prefix cannot be empty")
 
     def to_ordinary_args(self) -> Dict[str, Any]:
-        """
-        Collect ordinary xacro arguments.
-
-        Example:
-            name="arm_0" prefix="arm_0_" parent="world"
-        """
         args: Dict[str, Any] = {
-            "name": self.name,
             "prefix": self.prefix,
             "parent": self.parent.name,
         }
@@ -127,12 +99,6 @@ class Arm:
         return args
 
     def to_block_args(self) -> Dict[str, Dict[str, str]]:
-        """
-        Collect block arguments.
-
-        This version uses one origin block:
-            <origin xyz="..." rpy="..."/>
-        """
         return {
             "origin": {
                 "xyz": _format_vec3(self.xyz),
@@ -141,9 +107,83 @@ class Arm:
         }
 
 
-class Scene:
-    """A scene containing links and arms."""
+class ArmGroup:
+    def __init__(
+        self,
+        name: str,
+        macro: MacroSpec,
+        parent: Link,
+        xyz: Sequence[float] = (0.0, 0.0, 0.0),
+        rpy: Sequence[float] = (0.0, 0.0, 0.0),
+        arm_count: int = 5,
+        spacing: float = 1.0,
+        axis: str = "x",
+        arm_extra_args: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not name:
+            raise ValueError("ArmGroup.name cannot be empty")
+        if len(xyz) != 3:
+            raise ValueError(f"ArmGroup xyz must have length 3, got {xyz}")
+        if len(rpy) != 3:
+            raise ValueError(f"ArmGroup rpy must have length 3, got {rpy}")
+        if arm_count <= 0:
+            raise ValueError("ArmGroup.arm_count must be positive")
+        if spacing < 0:
+            raise ValueError("ArmGroup.spacing must be non-negative")
+        if axis not in ("x", "y"):
+            raise ValueError("ArmGroup.axis must be 'x' or 'y'")
 
+        self.name: str = name
+        self.macro: MacroSpec = macro
+        self.parent: Link = parent
+        self.xyz: Sequence[float] = xyz
+        self.rpy: Sequence[float] = rpy
+        self.arm_count: int = arm_count
+        self.spacing: float = spacing
+        self.axis: str = axis
+        self.arm_extra_args: Dict[str, Any] = (
+            arm_extra_args if arm_extra_args is not None else {}
+        )
+
+        self.group_link: Link = Link(
+            name=f"{self.name}_link",
+            parent=self.parent,
+            xyz=self.xyz,
+            rpy=self.rpy,
+        )
+
+    def get_group_link(self) -> Link:
+        return self.group_link
+
+    def generate_arms(self) -> List[Arm]:
+        arms: List[Arm] = []
+        for i in range(self.arm_count):
+            arm_name = self._make_arm_name(i)
+            arm_xyz = self._compute_arm_xyz(i)
+            arm = Arm(
+                name=arm_name,
+                macro=self.macro,
+                parent=self.group_link,
+                xyz=arm_xyz,
+                rpy=(0.0, 0.0, 0.0),
+                extra_args=dict(self.arm_extra_args),
+            )
+            arms.append(arm)
+        return arms
+
+    def _make_arm_name(self, index: int) -> str:
+        return f"{self.name}_arm_{index}"
+
+    def _compute_arm_xyz(self, index: int) -> Sequence[float]:
+        center = (self.arm_count - 1) / 2.0
+        offset = (index - center) * self.spacing
+
+        if self.axis == "x":
+            return (offset, 0.0, 0.0)
+        return (0.0, offset, 0.0)
+
+
+class Scene:
     def __init__(self, name: str, root_link: Link = WORLD) -> None:
         if not name:
             raise ValueError("Scene.name cannot be empty")
@@ -164,6 +204,11 @@ class Scene:
         if self.find_arm(arm.name) is not None:
             raise ValueError(f"Duplicate arm name: {arm.name}")
         self.arms.append(arm)
+
+    def add_group(self, group: ArmGroup) -> None:
+        self.add_link(group.get_group_link())
+        for arm in group.generate_arms():
+            self.add_arm(arm)
 
     def find_link(self, name: str) -> Optional[Link]:
         if self.root_link.name == name:
@@ -215,16 +260,6 @@ class Scene:
 
 
 class XacroRenderer:
-    """
-    Render a Scene into a xacro file.
-
-    This version:
-    - collects unique include files from all arms
-    - renders scene links
-    - renders one xacro macro call per arm
-    - handles ordinary arguments and block arguments separately
-    """
-
     XML_HEADER = '<?xml version="1.0"?>'
 
     def render(self, scene: Scene) -> str:
@@ -287,9 +322,7 @@ class XacroRenderer:
 
         lines: List[str] = []
         lines.append(f'  <link name="{_escape_attr(link.name)}" />')
-        lines.append(
-            f'  <joint name="{_escape_attr(link.name)}_joint" type="fixed">'
-        )
+        lines.append(f'  <joint name="{_escape_attr(link.name)}_joint" type="fixed">')
         lines.append(f'    <parent link="{_escape_attr(link.parent.name)}" />')
         lines.append(f'    <child link="{_escape_attr(link.name)}" />')
 
@@ -328,34 +361,27 @@ class XacroRenderer:
 
 if __name__ == "__main__":
     arm_macro = MacroSpec(
-        include_file="$(find my_robot_description)/urdf/arm_macro.xacro",
-        macro_name="my_arm",
+        include_file="$(find kuka_quantec_support)/urdf/kr210_r3100_2_macro.xacro",
+        macro_name="kuka_kr210_r3100_2_robot",
     )
 
     scene = Scene(name="multi_arm_scene")
 
-    scene.add_arm(
-        Arm(
-            name="arm_0",
-            macro=arm_macro,
-            parent=WORLD,
-            xyz=(0.0, 0.0, 0.0),
-            rpy=(0.0, 0.0, 0.0),
-        )
-    )
 
-    scene.add_arm(
-        Arm(
-            name="arm_1",
+    for i in range(5):
+        center_x = i * 5
+        group_i = ArmGroup(
+            name=f"group_{i}",
             macro=arm_macro,
             parent=WORLD,
-            xyz=(0.0, 0.0, 0.0),
-            rpy=(0.0, 0.0, 1.57),
-            extra_args={
-                "package_name": "kuka_quantec_support"
-            },
+            xyz=(center_x, 0, 0),
+            rpy=(0.0, 0.0, 0.0),
+            arm_count=5,
+            spacing=1.2,
+            axis="y",
+            arm_extra_args={"package_name": "kuka_quantec_support"}
         )
-    )
+        scene.add_group(group_i)
 
     renderer = XacroRenderer()
     renderer.write(scene, "generated/multi_arm_scene.xacro")
