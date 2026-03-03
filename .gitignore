@@ -1,0 +1,4 @@
+generated/
+pkg/build/
+pkg/install/
+pkg/log/

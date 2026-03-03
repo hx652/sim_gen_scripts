@@ -368,7 +368,7 @@ if __name__ == "__main__":
     scene = Scene(name="multi_arm_scene")
 
 
-    for i in range(5):
+    for i in range(4):
         center_x = i * 5
         group_i = ArmGroup(
             name=f"group_{i}",
